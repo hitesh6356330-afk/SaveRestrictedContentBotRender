@@ -13,6 +13,8 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import matplotlib
+matplotlib.use('Agg')  # Headless backend for servers
 import matplotlib.pyplot as plt
 import os
 
@@ -49,9 +51,10 @@ def user_full_name(user: User):
 
 async def store_user_data(context: ContextTypes.DEFAULT_TYPE, user_data: dict):
     text = "[USER_DATA]\n" + json.dumps(user_data, ensure_ascii=False)
+    logger.info(f"Attempting to send user data for user {user_data.get('user_id')}")
     try:
         await context.bot.send_message(chat_id=config.DATA_GROUP_ID, text=text)
-        logger.info(f"Sent user data for user {user_data.get('user_id')}")
+        logger.info(f"Successfully sent user data for user {user_data.get('user_id')}")
     except TelegramError as e:
         logger.error(f"Failed to send user data: {e}")
 
@@ -62,6 +65,7 @@ async def update_chart(context: ContextTypes.DEFAULT_TYPE):
     global chart_message_id, unique_users
 
     count = len(unique_users)
+    logger.info(f"Generating chart for {count} unique users...")
     fig, ax = plt.subplots(figsize=(6, 2))
     ax.bar(1, count, color='skyblue')
     ax.set_ylim(0, max(count + 10, 10))
@@ -73,6 +77,7 @@ async def update_chart(context: ContextTypes.DEFAULT_TYPE):
     plt.savefig(buf, format='png')
     buf.seek(0)
     plt.close(fig)
+    logger.info(f"Chart image buffer size: {buf.getbuffer().nbytes} bytes")
 
     chat_id = config.DATA_GROUP_ID
     bot = context.bot
@@ -90,7 +95,7 @@ async def update_chart(context: ContextTypes.DEFAULT_TYPE):
         try:
             await bot.delete_message(chat_id=chat_id, message_id=chart_message_id)
         except Exception:
-            pass
+            logger.warning("Could not delete old chart message")
         msg = await bot.send_photo(chat_id=chat_id, photo=buf, caption=f"Tracked Users: {count}")
         chart_message_id = msg.message_id
         logger.info(f"Recreated chart message after error, new id: {chart_message_id}")
@@ -101,7 +106,7 @@ async def track_new_user(user_id, context):
         unique_users.add(user_id)
         await update_chart(context)
 
-# --- Command and handler functions ---
+# --- Command handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Welcome! This bot tracks unique users in this group.\nUse /help to see available commands.")
@@ -309,9 +314,6 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in scanning: {e}")
         await context.bot.send_message(chat.id, f"Error during scan: {e}")
 
-async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Test command received!")
-
 def main():
     threading.Thread(target=run_fake_webserver, daemon=True).start()
 
@@ -345,7 +347,6 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_echo))
 
     application.run_polling()
-
 
 if __name__ == "__main__":
     main()
