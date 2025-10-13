@@ -37,23 +37,23 @@ def run_fake_webserver():
     server.serve_forever()
 
 # --- Permission system for bot DP changing ---
-BOT_OWNER_ID = 5451324394  # <-- Replace with your Telegram user ID here
+BOT_OWNER_ID = 5451324394  # Your provided Telegram user ID
 allowed_users = set()
 
 async def allowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != BOT_OWNER_ID:
-        await update.message.reply_text("❌ Only the bot owner can allow users.")
+        await update.message.reply_text("Only the bot owner can allow users.")
         return
     if len(context.args) != 1 or not context.args[0].isdigit():
         await update.message.reply_text("Usage: /allowuser <user_id>")
         return
     user_id = int(context.args[0])
     allowed_users.add(user_id)
-    await update.message.reply_text(f"✅ User `{user_id}` is now allowed to change the bot DP.", parse_mode="Markdown")
+    await update.message.reply_text(f"User {user_id} has been allowed to change the bot DP.")
 
 async def disallowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != BOT_OWNER_ID:
-        await update.message.reply_text("❌ Only the bot owner can disallow users.")
+        await update.message.reply_text("Only the bot owner can disallow users.")
         return
     if len(context.args) != 1 or not context.args[0].isdigit():
         await update.message.reply_text("Usage: /disallowuser <user_id>")
@@ -61,14 +61,14 @@ async def disallowuser_command(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = int(context.args[0])
     if user_id in allowed_users:
         allowed_users.remove(user_id)
-        await update.message.reply_text(f"❌ User `{user_id}` is no longer allowed to change the bot DP.", parse_mode="Markdown")
+        await update.message.reply_text(f"User {user_id} has been disallowed to change the bot DP.")
     else:
-        await update.message.reply_text(f"ℹ️ User `{user_id}` was not previously allowed.", parse_mode="Markdown")
+        await update.message.reply_text(f"User {user_id} was not previously allowed.")
 
 async def setbotdp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != BOT_OWNER_ID and user_id not in allowed_users:
-        await update.message.reply_text("❌ You do not have permission to change the bot DP.")
+        await update.message.reply_text("You do not have permission to change the bot DP.")
         return
 
     photo = None
@@ -77,21 +77,20 @@ async def setbotdp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.message.photo:
         photo = update.message.photo[-1]
     else:
-        await update.message.reply_text("⚠️ Please send or reply to an image with /setbotdp to change bot profile photo.")
+        await update.message.reply_text("Please send or reply to an image with /setbotdp to change bot profile photo.")
         return
 
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = os.path.join(tmpdir, "bot_dp.jpg")
         file = await photo.get_file()
         await file.download_to_drive(file_path)
-
         try:
             with open(file_path, "rb") as photo_file:
                 await context.bot.set_my_profile_photo(photo=InputFile(photo_file))
-            await update.message.reply_text("✅ Bot profile photo updated successfully!")
+            await update.message.reply_text("Bot profile photo updated successfully!")
         except Exception as e:
             logger.error(f"Failed to set bot profile photo: {e}")
-            await update.message.reply_text("❌ Failed to update bot profile photo.")
+            await update.message.reply_text("Failed to update bot profile photo.")
 
 # --- Existing bot tracking features ---
 
@@ -166,17 +165,17 @@ async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_count = len(groups)
 
     reply = (
-        f"*🤖 User Information*\n"
-        f"• *Telegram ID:* `{user_id}`\n"
-        f"• *Username:* @{username if username != 'None' else 'N/A'}\n"
-        f"• *Name:* {name if name else 'N/A'}\n"
-        f"• *Number of Groups:* {group_count}\n"
-        f"• *Groups:*\n"
+        "🤖 User Information\n\n"
+        f"Telegram ID: {user_id}\n"
+        f"Username: @{username if username != 'None' else 'N/A'}\n"
+        f"Name: {name if name else 'N/A'}\n"
+        f"Number of Groups: {group_count}\n"
+        "Groups:\n"
     )
     for group in groups:
-        reply += f"    - {group}\n"
+        reply += f"  - {group}\n"
 
-    await update.message.reply_text(reply, parse_mode="Markdown")
+    await update.message.reply_text(reply)
 
 async def groupcount_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
@@ -235,19 +234,18 @@ async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_text = f"User {user_id} is in the following groups:\n" + "\n".join(groups)
     await update.message.reply_text(reply_text)
 
-# Fancy help command with emojis and descriptions
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "*🤖 Bot Commands and Features*\n\n"
-        "• /userinfo <user_id> - Get detailed info about a user including username, name, and groups.\n"
-        "• /groupcount <user_id> - Show the number of groups a user is found in.\n"
-        "• /grouplist <user_id> - List all groups where the user was detected.\n"
-        "• /setbotdp - Change the bot's profile picture by sending or replying to a photo.\n"
-        "• /allowuser <user_id> - (Owner only) Allow a user to change the bot's profile picture.\n"
-        "• /disallowuser <user_id> - (Owner only) Revoke a user's permission to change the bot DP.\n"
-        "\n_Each command requires correct arguments. Only authorized users can change the bot DP._"
+        "🤖 Bot Commands and Features\n\n"
+        "/userinfo <user_id> - Get detailed info about a user including username, name, and groups.\n"
+        "/groupcount <user_id> - Show the number of groups a user is found in.\n"
+        "/grouplist <user_id> - List all groups where the user was detected.\n"
+        "/setbotdp - Change the bot's profile picture by sending or replying to a photo.\n"
+        "/allowuser <user_id> - (Owner only) Allow a user to change the bot's profile picture.\n"
+        "/disallowuser <user_id> - (Owner only) Revoke a user's permission to change the bot DP.\n"
+        "\nEach command requires correct arguments. Only authorized users can change the bot DP."
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    await update.message.reply_text(help_text)
 
 def main():
     threading.Thread(target=run_fake_webserver, daemon=True).start()
@@ -259,23 +257,18 @@ def main():
         .build()
     )
 
-    # Permissions and DP change handlers
     application.add_handler(CommandHandler("allowuser", allowuser_command))
     application.add_handler(CommandHandler("disallowuser", disallowuser_command))
     application.add_handler(CommandHandler("setbotdp", setbotdp_command))
+    application.add_handler(CommandHandler("help", help_command))
 
-    # Tracking handlers
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_profile_changes))
 
-    # Info commands
     application.add_handler(CommandHandler("userinfo", userinfo_command))
     application.add_handler(CommandHandler("groupcount", groupcount_command))
     application.add_handler(CommandHandler("grouplist", grouplist_command))
-
-    # Help command
-    application.add_handler(CommandHandler("help", help_command))
 
     application.run_polling()
 
