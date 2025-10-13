@@ -113,7 +113,7 @@ async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(reply)
 
 
-async def main():
+def main():
     application = (
         ApplicationBuilder()
         .token(config.BOT_TOKEN)
@@ -127,9 +127,8 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), track_profile_changes))
     application.add_handler(CommandHandler("userinfo", userinfo_command))
 
-    await application.run_polling()
+    application.run_polling()
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
