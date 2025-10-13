@@ -39,6 +39,7 @@ def run_fake_webserver():
 
 BOT_OWNER_ID = 5451324394  # Your Telegram user ID
 
+allowed_users = set()
 tracked_users = {}
 
 def now_iso():
@@ -63,6 +64,41 @@ def update_name_history(user_data, new_name: str):
     if not history or history[-1]["name"] != new_name:
         history.append({"name": new_name, "timestamp": now_iso()})
 
+async def store_user_data(context: ContextTypes.DEFAULT_TYPE, user_data: dict):
+    text = "[USER_DATA]\n" + json.dumps(user_data, ensure_ascii=False)
+    try:
+        await context.bot.send_message(chat_id=config.DATA_GROUP_ID, text=text)
+    except Exception as e:
+        logger.error(f"Failed to send user data to database group: {e}")
+
+def user_is_allowed(user_id):
+    return user_id == BOT_OWNER_ID or user_id in allowed_users
+
+async def allowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != BOT_OWNER_ID:
+        await update.message.reply_text("Only the bot owner can allow users.")
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /allowuser <user_id>")
+        return
+    user_id = int(context.args[0])
+    allowed_users.add(user_id)
+    await update.message.reply_text(f"User {user_id} has been allowed for privileged commands.")
+
+async def disallowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != BOT_OWNER_ID:
+        await update.message.reply_text("Only the bot owner can disallow users.")
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /disallowuser <user_id>")
+        return
+    user_id = int(context.args[0])
+    if user_id in allowed_users:
+        allowed_users.remove(user_id)
+        await update.message.reply_text(f"User {user_id} has been disallowed for privileged commands.")
+    else:
+        await update.message.reply_text(f"User {user_id} was not previously allowed.")
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quote = (
         "🤖 Hello! Welcome to the Ultimate Group Tracker Bot!\n\n"
@@ -75,13 +111,25 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Test command received!")
 
-async def debug_echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text:
-        await update.message.reply_text(f"Echo: {update.message.text}")
+async def pingall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not tracked_users:
+        await update.message.reply_text("No users tracked yet.")
+        return
+    message = (
+        "👋 Hello friends! Don’t forget to send /stayactive to keep enjoying this group’s benefits! 🚀\n\n"
+        "This helps us keep the group lively and secure for active members only!"
+    )
+    await update.message.reply_text(message)
+
+async def stayactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"Thanks for staying active, {user.first_name}! Keep enjoying the group 😀"
+    )
 
 async def scan_group_members(chat, context: ContextTypes.DEFAULT_TYPE):
     try:
-        total_members = await context.bot.get_chat_members_count(chat.id)
+        total_members = await context.bot.get_chat_member_count(chat.id)
         await context.bot.send_message(chat.id, f"Starting scan of {total_members} members in this group...")
         admins = await context.bot.get_chat_administrators(chat.id)
         count = 0
@@ -133,6 +181,7 @@ async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "group_name": chat.title or "",
             "timestamp": now_iso()
         })
+        await store_user_data(context, user_data)
         await context.bot.send_message(chat.id, f"Tracking started for new user {user_full_name(user)} ({user.id})")
 
 async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,6 +198,7 @@ async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "group_name": chat.title or "",
             "timestamp": now_iso()
         })
+        await store_user_data(context, user_data)
         await context.bot.send_message(chat.id, f"User {user_full_name(user)} ({user.id}) left the group. Tracking updated.")
 
 async def track_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -168,8 +218,10 @@ async def track_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_group_if_new(user_data, chat)
     update_name_history(user_data, user_full_name(user))
     user_data["last_seen"] = now_iso()
+    await store_user_data(context, user_data)
 
 async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = None
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /userinfo <user_id>")
         return
@@ -178,6 +230,11 @@ async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("User ID must be a number.")
         return
+
+    if not user_is_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this command.")
+        return
+
     user_data = tracked_users.get(user_id)
     if not user_data:
         await update.message.reply_text(f"No tracked data for user ID {user_id}")
@@ -199,24 +256,11 @@ async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def scannedcount_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_is_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this command.")
+        return
     count = len(tracked_users)
     await update.message.reply_text(f"Currently scanned and tracked users: {count}")
-
-async def pingall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not tracked_users:
-        await update.message.reply_text("No users tracked yet.")
-        return
-    message = (
-        "👋 Hello friends! Don’t forget to send /stayactive to keep enjoying this group’s benefits! 🚀\n\n"
-        "This helps us keep the group lively and secure for active members only!"
-    )
-    await update.message.reply_text(message)
-
-async def stayactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await update.message.reply_text(
-        f"Thanks for staying active, {user.first_name}! Keep enjoying the group 😀"
-    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
@@ -229,6 +273,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scannedcount - Show how many users are currently tracked\n"
         "/pingall - Send an engaging message to encourage activity\n"
         "/stayactive - Let the bot know you’re active and stay in the group\n"
+        "/allowuser <user_id> - (Owner only) Allow user for privileged commands\n"
+        "/disallowuser <user_id> - (Owner only) Revoke user permission\n"
         "\nThe bot tracks joins, leaves, messages, and name changes after joining groups."
     )
     await update.message.reply_text(help_text)
@@ -249,6 +295,8 @@ def main():
     application.add_handler(CommandHandler("scannedcount", scannedcount_command))
     application.add_handler(CommandHandler("pingall", pingall_command))
     application.add_handler(CommandHandler("stayactive", stayactive_command))
+    application.add_handler(CommandHandler("allowuser", allowuser_command))
+    application.add_handler(CommandHandler("disallowuser", disallowuser_command))
 
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
