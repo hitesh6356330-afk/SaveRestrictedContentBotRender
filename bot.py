@@ -13,7 +13,7 @@ import threading
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import config
+import config  # Make sure config.py is in your project with BOT_TOKEN and DATA_GROUP_ID defined
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -37,7 +37,7 @@ def run_fake_webserver():
     server.serve_forever()
 
 
-BOT_OWNER_ID = 5451324394  # Your Telegram user ID
+BOT_OWNER_ID = 5451324394  # Your Telegram user ID, change if needed
 
 allowed_users = set()
 tracked_users = {}
@@ -221,7 +221,9 @@ async def track_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await store_user_data(context, user_data)
 
 async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = None
+    if not user_is_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this command.")
+        return
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /userinfo <user_id>")
         return
@@ -229,10 +231,6 @@ async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(context.args[0])
     except Exception:
         await update.message.reply_text("User ID must be a number.")
-        return
-
-    if not user_is_allowed(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this command.")
         return
 
     user_data = tracked_users.get(user_id)
