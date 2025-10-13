@@ -1,7 +1,7 @@
 import logging
 import json
 from datetime import datetime
-from telegram import Update, InputFile
+from telegram import Update, User, Chat
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -12,7 +12,6 @@ from telegram.ext import (
 import threading
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import tempfile
 
 import config
 
@@ -22,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Fake minimal web server handler ---
+# Fake web server for Render
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -36,264 +35,188 @@ def run_fake_webserver():
     logger.info(f"Starting fake web server on port {port}")
     server.serve_forever()
 
-# --- Permission system for bot DP changing ---
 BOT_OWNER_ID = 5451324394  # Your Telegram user ID
-allowed_users = set()
 
-async def allowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != BOT_OWNER_ID:
-        await update.message.reply_text("Only the bot owner can allow users.")
-        return
-    if len(context.args) != 1 or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /allowuser <user_id>")
-        return
-    user_id = int(context.args[0])
-    allowed_users.add(user_id)
-    await update.message.reply_text(f"User {user_id} has been allowed to change the bot DP.")
+# In-memory datastore: user_id -> user data dict
+tracked_users = {}
 
-async def disallowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != BOT_OWNER_ID:
-        await update.message.reply_text("Only the bot owner can disallow users.")
-        return
-    if len(context.args) != 1 or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /disallowuser <user_id>")
-        return
-    user_id = int(context.args[0])
-    if user_id in allowed_users:
-        allowed_users.remove(user_id)
-        await update.message.reply_text(f"User {user_id} has been disallowed to change the bot DP.")
-    else:
-        await update.message.reply_text(f"User {user_id} was not previously allowed.")
+def now_iso():
+    return datetime.utcnow().isoformat() + "Z"
 
-async def setbotdp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != BOT_OWNER_ID and user_id not in allowed_users:
-        await update.message.reply_text("You do not have permission to change the bot DP.")
-        return
+def user_full_name(user: User):
+    return f"{user.first_name or ''} {user.last_name or ''}".strip()
 
-    photo = None
-    if update.message.reply_to_message and update.message.reply_to_message.photo:
-        photo = update.message.reply_to_message.photo[-1]
-    elif update.message.photo:
-        photo = update.message.photo[-1]
-    else:
-        await update.message.reply_text("Please send or reply to an image with /setbotdp to change bot profile photo.")
-        return
+def add_group_if_new(user_data, chat: Chat):
+    for g in user_data.get("groups", []):
+        if g['group_id'] == chat.id:
+            return
+    user_data.setdefault("groups", []).append({
+        "group_id": chat.id,
+        "group_name": chat.title or "",
+        "join_time": now_iso(),
+        "leave_time": None
+    })
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        file_path = os.path.join(tmpdir, "bot_dp.jpg")
-        file = await photo.get_file()
-        await file.download_to_drive(file_path)
-        try:
-            with open(file_path, "rb") as photo_file:
-                await context.bot.set_my_profile_photo(photo=InputFile(photo_file))
-            await update.message.reply_text("Bot profile photo updated successfully!")
-        except Exception as e:
-            logger.error(f"Failed to set bot profile photo: {e}")
-            await update.message.reply_text("Failed to update bot profile photo.")
+def update_name_history(user_data, new_name: str):
+    history = user_data.setdefault("name_history", [])
+    if not history or history[-1]["name"] != new_name:
+        history.append({"name": new_name, "timestamp": now_iso()})
 
-# --- Debug & Testing Handlers ---
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot is running! Send /help to see commands.")
-
-async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Test command received!")
-
-async def debug_echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text:
-        await update.message.reply_text(f"Received your message: {update.message.text}")
-
-# --- Existing bot tracking features ---
-
-def json_serialize_user(user, group_title=None, event="unknown"):
-    return {
-        "user_id": user.id,
-        "username": user.username,
-        "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
-        "event": event,
-        "group": group_title,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-    }
-
-async def store_user_data(context: ContextTypes.DEFAULT_TYPE, user_data: dict):
-    text = "[USER_DATA]\n" + json.dumps(user_data, ensure_ascii=False)
+async def scan_group_members(chat, context: ContextTypes.DEFAULT_TYPE):
+    """Call this to scan all existing members of a chat and update tracking"""
+    logger.info(f"Scanning members in group {chat.title} ({chat.id})")
+    # Telegram API does not provide a direct get all members method
+    # Workaround: get administrators + track joins & leaves
     try:
-        await context.bot.send_message(chat_id=config.DATA_GROUP_ID, text=text)
+        admins = await context.bot.get_chat_administrators(chat.id)
+        # Add admins to tracking as example; extend as needed
+        for admin in admins:
+            user = admin.user
+            user_data = tracked_users.setdefault(user.id, {
+                "username": user.username,
+                "user_id": user.id,
+                "profile_photo_changes": [],
+                "last_seen": None,
+                "groups": [],
+                "name_history": [],
+                "join_leave_history": []
+            })
+            add_group_if_new(user_data, chat)
+            update_name_history(user_data, user_full_name(user))
+        logger.info(f"Scanned {len(admins)} admins in {chat.title}")
+        await context.bot.send_message(chat.id, f"Scanned {len(admins)} admins in this group for tracking.")
     except Exception as e:
-        logger.error(f"Failed to store user data: {e}")
+        logger.error(f"Error scanning group members: {e}")
+
+# Command handlers and event handlers
 
 async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
     for user in update.message.new_chat_members:
-        user_data = json_serialize_user(user, update.effective_chat.title, "joined")
-        await store_user_data(context, user_data)
+        user_data = tracked_users.setdefault(user.id, {
+            "username": user.username,
+            "user_id": user.id,
+            "profile_photo_changes": [],
+            "last_seen": None,
+            "groups": [],
+            "name_history": [],
+            "join_leave_history": []
+        })
+        add_group_if_new(user_data, chat)
+        update_name_history(user_data, user_full_name(user))
+        user_data.setdefault("join_leave_history", []).append({
+            "event": "joined",
+            "group_id": chat.id,
+            "group_name": chat.title or "",
+            "timestamp": now_iso()
+        })
+        await context.bot.send_message(chat.id, f"Tracking started for new user {user_full_name(user)} ({user.id})")
 
 async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
     user = update.message.left_chat_member
-    if user:
-        user_data = json_serialize_user(user, update.effective_chat.title, "left")
-        await store_user_data(context, user_data)
+    if user and user.id in tracked_users:
+        user_data = tracked_users[user.id]
+        # Mark leave time in user's group data
+        for g in user_data.get("groups", []):
+            if g["group_id"] == chat.id and g.get("leave_time") is None:
+                g["leave_time"] = now_iso()
+        # Update join_leave_history
+        user_data.setdefault("join_leave_history", []).append({
+            "event": "left",
+            "group_id": chat.id,
+            "group_name": chat.title or "",
+            "timestamp": now_iso()
+        })
+        await context.bot.send_message(chat.id, f"User {user_full_name(user)} ({user.id}) left the group. Tracking updated.")
 
 async def track_profile_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    chat_title = update.effective_chat.title if update.effective_chat else None
-    if user:
-        user_data = json_serialize_user(user, chat_title, "profile_update")
-        await store_user_data(context, user_data)
+    if user and user.id in tracked_users:
+        user_data = tracked_users[user.id]
+        new_name = user_full_name(user)
+        update_name_history(user_data, new_name)
+        user_data["username"] = user.username
+        user_data["last_seen"] = now_iso()
 
 async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /userinfo <user_id>")
         return
-    user_id_str = context.args[0]
-    if not user_id_str.isdigit():
+    try:
+        user_id = int(context.args[0])
+    except:
         await update.message.reply_text("User ID must be a number.")
         return
-
-    user_id = int(user_id_str)
-    messages = []
-    try:
-        async for message in context.bot.get_chat_history(config.DATA_GROUP_ID, limit=500):
-            if message.text and message.text.startswith("[USER_DATA]"):
-                try:
-                    data = json.loads(message.text.split("\n", 1)[1])
-                    if data.get("user_id") == user_id:
-                        messages.append(data)
-                except Exception:
-                    continue
-    except Exception as e:
-        logger.error(f"Error fetching messages: {e}")
-        await update.message.reply_text("Failed to fetch user data.")
+    user_data = tracked_users.get(user_id)
+    if not user_data:
+        await update.message.reply_text(f"No tracked data for user ID {user_id}")
         return
 
-    if not messages:
-        await update.message.reply_text("No data found for this user.")
+    msg = f"📄 User Info for ID {user_id}:\n"
+    msg += f"Username: @{user_data.get('username', 'N/A')}\n"
+    msg += "Name history:\n"
+    for h in user_data.get("name_history", []):
+        msg += f"  - {h['name']} (at {h['timestamp']})\n"
+    msg += "Groups:\n"
+    for g in user_data.get("groups", []):
+        msg += f"  - {g.get('group_name')} (Joined: {g.get('join_time')}, Left: {g.get('leave_time') or 'Still member'})\n"
+    msg += "Join/Leave History:\n"
+    for ev in user_data.get("join_leave_history", []):
+        msg += f"  - {ev['event'].capitalize()} {ev.get('group_name')} at {ev['timestamp']}\n"
+    msg += f"Last Seen (message/activity): {user_data.get('last_seen') or 'Unknown'}\n"
+    # Profile photo changes not implemented due to API limitations
+
+    await update.message.reply_text(msg)
+
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    # Only allow in groups and for admins
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in groups.")
         return
-
-    username = messages[-1].get("username", "None")
-    name = messages[-1].get("name", "None")
-    groups = {m.get("group") for m in messages if m.get("group")}
-    groups.discard(None)
-    group_count = len(groups)
-
-    reply = (
-        "🤖 User Information\n\n"
-        f"Telegram ID: {user_id}\n"
-        f"Username: @{username if username != 'None' else 'N/A'}\n"
-        f"Name: {name if name else 'N/A'}\n"
-        f"Number of Groups: {group_count}\n"
-        "Groups:\n"
-    )
-    for group in groups:
-        reply += f"  - {group}\n"
-
-    await update.message.reply_text(reply)
-
-async def groupcount_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 1:
-        await update.message.reply_text("Usage: /groupcount <user_id>")
-        return
-    user_id_str = context.args[0]
-    if not user_id_str.isdigit():
-        await update.message.reply_text("User ID must be a number.")
-        return
-    user_id = int(user_id_str)
-
-    groups = set()
-    try:
-        async for message in context.bot.get_chat_history(config.DATA_GROUP_ID, limit=500):
-            if message.text and message.text.startswith("[USER_DATA]"):
-                try:
-                    data = json.loads(message.text.split("\n",1)[1])
-                    if data.get("user_id") == user_id and data.get("group"):
-                        groups.add(data.get("group"))
-                except:
-                    continue
-    except Exception as e:
-        await update.message.reply_text("Failed to fetch group data.")
-        return
-
-    await update.message.reply_text(f"User {user_id} found in {len(groups)} groups.")
-
-async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 1:
-        await update.message.reply_text("Usage: /grouplist <user_id>")
-        return
-    user_id_str = context.args[0]
-    if not user_id_str.isdigit():
-        await update.message.reply_text("User ID must be a number.")
-        return
-    user_id = int(user_id_str)
-
-    groups = set()
-    try:
-        async for message in context.bot.get_chat_history(config.DATA_GROUP_ID, limit=500):
-            if message.text and message.text.startswith("[USER_DATA]"):
-                try:
-                    data = json.loads(message.text.split("\n",1)[1])
-                    if data.get("user_id") == user_id and data.get("group"):
-                        groups.add(data.get("group"))
-                except:
-                    continue
-    except Exception as e:
-        await update.message.reply_text("Failed to fetch group list.")
-        return
-
-    if not groups:
-        await update.message.reply_text("No groups found for this user.")
-        return
-
-    reply_text = f"User {user_id} is in the following groups:\n" + "\n".join(groups)
-    await update.message.reply_text(reply_text)
+    # Scan members (for prototype, only admins)
+    await scan_group_members(chat, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "🤖 Bot Commands and Features\n\n"
-        "/start - Start the bot and confirm it is running.\n"
-        "/test  - Test command to check bot responsiveness.\n"
-        "/help  - Show this help message.\n"
-        "/userinfo <user_id> - Get detailed info about a user including username, name, and groups.\n"
-        "/groupcount <user_id> - Show the number of groups a user is found in.\n"
-        "/grouplist <user_id> - List all groups where the user was detected.\n"
-        "/setbotdp - Change the bot's profile picture by sending or replying to a photo.\n"
-        "/allowuser <user_id> - (Owner only) Allow a user to change the bot's profile picture.\n"
-        "/disallowuser <user_id> - (Owner only) Revoke a user's permission to change the bot DP.\n"
-        "\nEach command requires correct arguments. Only authorized users can change the bot DP."
+        "🤖 Bot Commands and Features:\n\n"
+        "/start - Start bot and test responsiveness\n"
+        "/help - Show this help message\n"
+        "/test - Test command for responsiveness\n"
+        "/scan - Scan current group members and track them (group only)\n"
+        "/userinfo <user_id> - Show full tracked info for a user\n"
+        "\nThe bot continuously tracks joins, leaves, and name changes after being added."
     )
     await update.message.reply_text(help_text)
 
 def main():
     threading.Thread(target=run_fake_webserver, daemon=True).start()
 
-    application = (
-        ApplicationBuilder()
-        .token(config.BOT_TOKEN)
-        .concurrent_updates(True)
-        .build()
-    )
+    application = (ApplicationBuilder()
+                   .token(config.BOT_TOKEN)
+                   .concurrent_updates(True)
+                   .build())
 
-    # Debug and test commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("test", test_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_echo))
-
-    # Permissions and DP change handlers
-    application.add_handler(CommandHandler("allowuser", allowuser_command))
-    application.add_handler(CommandHandler("disallowuser", disallowuser_command))
-    application.add_handler(CommandHandler("setbotdp", setbotdp_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("scan", scan_command))
+    application.add_handler(CommandHandler("userinfo", userinfo_command))
 
-    # Tracking handlers
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_profile_changes))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_profile_changes))  # Update last seen
 
-    # Info commands
-    application.add_handler(CommandHandler("userinfo", userinfo_command))
-    application.add_handler(CommandHandler("groupcount", groupcount_command))
-    application.add_handler(CommandHandler("grouplist", grouplist_command))
+    # Debug echo handler
+    async def debug_echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message.text:
+            await update.message.reply_text(f"Echo: {update.message.text}")
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_echo))
 
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
