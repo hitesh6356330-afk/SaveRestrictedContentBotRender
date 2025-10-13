@@ -1,4 +1,4 @@
-IG_USERNAME = "your_instagram_username"
+IG_USERNAME = "arindam.f_____n"
 IG_PASSWORD = "your_instagram_password"
 # Fill with your data
 BOT_TOKEN = "8263131820:AAGpoyAtisEpNKTkNMeA4g6Jq7hvKyz-Zz0"
