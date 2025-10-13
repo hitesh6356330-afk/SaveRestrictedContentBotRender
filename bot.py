@@ -16,13 +16,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import matplotlib.pyplot as plt
 import os
 
-import config  # Your config.py must contain BOT_TOKEN, DATA_GROUP_ID, BOT_OWNER_ID
+import config  # Make sure config.py provides BOT_TOKEN, DATA_GROUP_ID, BOT_OWNER_ID
 
-# Set up logging
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Simple health-check HTTP server for Render
+# Health check HTTP server for Render
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -30,42 +31,54 @@ class SimpleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Telegram bot is running")
 
-def run_web_server():
+def run_fake_webserver():
     port = int(os.environ.get("PORT", "10000"))
     server = HTTPServer(("0.0.0.0", port), SimpleHandler)
-    logger.info(f"Starting web server on port {port}")
+    logger.info(f"Starting fake web server on port {port}")
     server.serve_forever()
 
-# In-memory set of all unique user IDs
+
+# Globals for user tracking and chart message
 unique_users = set()
 chart_message_id = None
-allowed_users = set()
+
 
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
 
+
 def user_full_name(user: User):
     return f"{user.first_name or ''} {user.last_name or ''}".strip()
 
-async def store_user_data(context: 'telegram.ext.CallbackContext', user_data: dict):
+
+async def store_user_data(context: ContextTypes.DEFAULT_TYPE, user_data: dict):
     text = "[USER_DATA]\n" + json.dumps(user_data, ensure_ascii=False)
     try:
         await context.bot.send_message(chat_id=config.DATA_GROUP_ID, text=text)
-        logger.info(f"Stored data for user {user_data['user_id']}")
+        logger.info(f"Sent user data for user {user_data.get('user_id')}")
     except TelegramError as e:
         logger.error(f"Failed to send user data: {e}")
 
-async def update_chart(context: 'telegram.ext.CallbackContext'):
+
+def user_is_allowed(user_id):
+    return user_id == config.BOT_OWNER_ID or user_id in allowed_users
+
+
+allowed_users = set()
+
+
+async def update_chart(context: ContextTypes.DEFAULT_TYPE):
     global chart_message_id, unique_users
 
     count = len(unique_users)
-    # Drawing simple bar chart for the count
-    fig, ax = plt.subplots(figsize=(6,2))
+    # Generate simple bar chart image
+    fig, ax = plt.subplots(figsize=(6, 2))
     ax.bar(1, count, color='skyblue')
-    ax.set_ylim(0, max(count+10, 10))
+    ax.set_ylim(0, max(count + 10, 10))
     ax.set_xticks([])
-    ax.set_title("Unique Users Tracked")
-    # Save to buffer
+    ax.set_title("Total Unique Users Tracked")
+    ax.set_ylabel("Count")
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
     buf.seek(0)
@@ -73,20 +86,32 @@ async def update_chart(context: 'telegram.ext.CallbackContext'):
 
     chat_id = config.DATA_GROUP_ID
     bot = context.bot
+
     try:
-        if not chart_message_id:
+        if chart_message_id is None:
+            # Send new photo message with chart
             msg = await bot.send_photo(chat_id=chat_id, photo=buf, caption=f"Tracked Users: {count}")
             chart_message_id = msg.message_id
+            logger.info(f"Created new chart message id: {chart_message_id}")
         else:
-            await bot.edit_message_caption(chat_id=chat_id, message_id=chart_message_id, caption=f"Tracked Users: {count}")
-    except TelegramError:
-        # If editing caption fails (e.g., message deleted), send new
+            # Try editing caption (Telegram does not allow photo update via API currently)
+            await bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=chart_message_id,
+                caption=f"Tracked Users: {count}"
+            )
+            logger.info(f"Updated chart message caption to count {count}")
+    except TelegramError as e:
+        logger.error(f"Failed to update chart message: {e}")
+        # If edit failed (maybe message deleted), delete and send fresh
         try:
             await bot.delete_message(chat_id=chat_id, message_id=chart_message_id)
-        except:
+        except Exception:
             pass
         msg = await bot.send_photo(chat_id=chat_id, photo=buf, caption=f"Tracked Users: {count}")
         chart_message_id = msg.message_id
+        logger.info(f"Recreated chart message after error, new id: {chart_message_id}")
+
 
 async def track_new_user(user_id, context):
     global unique_users
@@ -94,40 +119,47 @@ async def track_new_user(user_id, context):
         unique_users.add(user_id)
         await update_chart(context)
 
-# --- Command & Handler functions ---
 
-async def start_command(update: Update, context: 'telegram.ext.CallbackContext'):
-    await update.message.reply_text("🤖 Welcome! Tracking group users. Use /help.")
+# Bot commands and handlers
 
-async def allowuser_command(update: Update, context: 'telegram.ext.CallbackContext'):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Welcome! This bot tracks unique users in this group.\n"
+        "Use /help to see available commands."
+    )
+
+
+async def allowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != config.BOT_OWNER_ID:
-        await update.message.reply_text("Only owner.")
+        await update.message.reply_text("Only the bot owner can allow users.")
         return
-    if len(context.args)!=1 or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /allowuser <id>")
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /allowuser <user_id>")
         return
     user_id = int(context.args[0])
     allowed_users.add(user_id)
-    await update.message.reply_text(f"Allowed {user_id}")
+    await update.message.reply_text(f"User {user_id} has been allowed.")
 
-async def disallowuser_command(update: Update, context: 'telegram.ext.CallbackContext'):
+
+async def disallowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != config.BOT_OWNER_ID:
-        await update.message.reply_text("Only owner.")
+        await update.message.reply_text("Only the bot owner can disallow users.")
         return
-    if len(context.args)!=1 or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /disallowuser <id>")
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /disallowuser <user_id>")
         return
     user_id = int(context.args[0])
     if user_id in allowed_users:
         allowed_users.remove(user_id)
-        await update.message.reply_text(f"Disallowed {user_id}")
+        await update.message.reply_text(f"User {user_id} has been disallowed.")
     else:
-        await update.message.reply_text("Not allowed previously.")
+        await update.message.reply_text(f"User {user_id} was not allowed before.")
 
-async def new_member(update: Update, context: 'telegram.ext.CallbackContext'):
+
+async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     for user in update.message.new_chat_members:
-        data = {
+        user_data = {
             "user_id": user.id,
             "username": user.username,
             "name": user_full_name(user),
@@ -135,92 +167,183 @@ async def new_member(update: Update, context: 'telegram.ext.CallbackContext'):
             "group": chat.title,
             "timestamp": now_iso()
         }
-        await store_user_data(context, data)
+        await store_user_data(context, user_data)
         await track_new_user(user.id, context)
 
-async def member_left(update: Update, context: 'telegram.ext.CallbackContext'):
+
+async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
     user = update.message.left_chat_member
     if user:
-        data = {
+        user_data = {
             "user_id": user.id,
             "username": user.username,
             "name": user_full_name(user),
             "event": "left",
-            "group": update.effective_chat.title,
+            "group": chat.title,
             "timestamp": now_iso()
         }
-        await store_user_data(context, data)
+        await store_user_data(context, user_data)
 
-async def track_all_users(update: Update, context: 'telegram.ext.CallbackContext'):
+
+async def track_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user:
-        return
-    # Track user count
-    await track_new_user(user.id, context)
-    # Store message info
-    data = {
-        "user_id": user.id,
-        "username": user.username,
-        "name": user_full_name(user),
-        "event": "message",
-        "group": update.effective_chat.title,
-        "timestamp": now_iso()
-    }
-    await store_user_data(context, data)
+    chat_title = update.effective_chat.title if update.effective_chat else None
+    if user:
+        user_data = {
+            "user_id": user.id,
+            "username": user.username,
+            "name": user_full_name(user),
+            "event": "message",
+            "group": chat_title,
+            "timestamp": now_iso()
+        }
+        await store_user_data(context, user_data)
+        await track_new_user(user.id, context)
 
-# --- Command to show info --- 
 
-async def userinfo_command(update: Update, context: 'telegram.ext.CallbackContext'):
-    if not (update.effective_user.id==config.BOT_OWNER_ID or update.effective_user.id in allowed_users):
-        await update.message.reply_text("Not authorized.")
+async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_is_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this command.")
         return
-    if len(context.args)!=1 or not context.args[0].isdigit():
+
+    if len(context.args) != 1:
         await update.message.reply_text("Usage: /userinfo <user_id>")
         return
-    uid=int(context.args[0])
-    # Fetch last 100 messages from group
+
+    user_id_str = context.args[0]
+    if not user_id_str.isdigit():
+        await update.message.reply_text("User ID must be a number.")
+        return
+    user_id = int(user_id_str)
+
     try:
-        msgs = await context.bot.get_chat_history(config.DATA_GROUP_ID, limit=100)
-    except:
-        await update.message.reply_text("Error fetch.")
+        # Search messages starting with [USER_DATA] matching user_id, limit 1000 most recent
+        messages = await context.bot.get_chat_history(config.DATA_GROUP_ID, limit=1000)
+    except Exception as e:
+        logger.error(f"Error fetching chat history: {e}")
+        await update.message.reply_text("Failed to fetch user data from database group.")
         return
-    user_data_msg = [m for m in msgs if m.text and m.text.startswith("[USER_DATA]")]
-    user_data_list = []
-    for m in user_data_msg:
-        try:
-            data = json.loads(m.text.split("\n",1)[1])
-            if data.get("user_id")==uid:
-                user_data_list.append(data)
-        except:
-            continue
-    if not user_data_list:
-        await update.message.reply_text("No data.")
+
+    user_messages = []
+    for message in messages:
+        if message.text and message.text.startswith("[USER_DATA]"):
+            try:
+                data = json.loads(message.text.split("\n", 1)[1])
+                if data.get("user_id") == user_id:
+                    user_messages.append(data)
+            except Exception:
+                continue
+
+    if not user_messages:
+        await update.message.reply_text("No data found for this user.")
         return
-    latest = user_data_list[-1]
-    groups = {d.get("group") for d in user_data_list}
+
+    latest = user_messages[-1]
+    username = latest.get("username", "None")
+    name = latest.get("name", "None")
+    groups = {m.get("group") for m in user_messages if m.get("group")}
     groups.discard(None)
+    group_count = len(groups)
+
+    reply = (
+        f"Human found!\n"
+        f"Telegram ID: {user_id}\n"
+        f"Username: {username}\n"
+        f"Name: {name}\n"
+        f"Number of groups found: {group_count}\n"
+        f"Groups: {', '.join(groups) if groups else 'None'}"
+    )
+    await update.message.reply_text(reply)
+
+
+async def scannedcount_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_is_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this command.")
+        return
+
+    try:
+        messages = await context.bot.get_chat_history(config.DATA_GROUP_ID, limit=1000)
+    except Exception as e:
+        logger.error(f"Error fetching chat history: {e}")
+        await update.message.reply_text("Failed to count scanned users.")
+        return
+
+    count = sum(1 for m in messages if m.text and m.text.startswith("[USER_DATA]"))
+    await update.message.reply_text(f"Currently scanned and tracked user records: {count}")
+
+
+async def pingall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_is_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this command.")
+        return
+    if len(unique_users) == 0:
+        await update.message.reply_text("No users tracked yet.")
+        return
     await update.message.reply_text(
-        f"ID:{uid}\nUsername:{latest.get('username')}\nName:{latest.get('name')}\nGroups:{len(groups)}"
+        "👋 Hello friends! Don’t forget to send /stayactive to keep enjoying this group’s benefits! 🚀"
     )
 
-# --- Main ---
+
+async def stayactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"Thanks for staying active, {user.first_name}! Keep enjoying the group 😀"
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "🤖 Bot Commands and Features:\n\n"
+        "/start - Start and check bot responsiveness\n"
+        "/help - Show this help message\n"
+        "/test - Test command\n"
+        "/scan - Scan current group admins for tracking (group only)\n"
+        "/userinfo <user_id> - Show tracked info for user\n"
+        "/scannedcount - Show how many users are currently tracked\n"
+        "/pingall - Send an engaging message to encourage activity\n"
+        "/stayactive - Let the bot know you’re active and stay in the group\n"
+        "/allowuser <user_id> - (Owner only) Allow user for privileged commands\n"
+        "/disallowuser <user_id> - (Owner only) Revoke user permission\n"
+        "\nThe bot tracks joins, leaves, messages, and name changes after joining groups."
+    )
+    await update.message.reply_text(help_text)
+
+
 def main():
-    threading.Thread(target=run_web_server, daemon=True).start()
+    threading.Thread(target=run_fake_webserver, daemon=True).start()
 
-    app = ApplicationBuilder().token(config.BOT_TOKEN).build()
+    application = (
+        ApplicationBuilder()
+        .token(config.BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("allowuser", allowuser_command))
-    app.add_handler(CommandHandler("disallowuser", disallowuser_command))
-    app.add_handler(CommandHandler("userinfo", userinfo_command))
-    app.add_handler(CommandHandler("scannedcount", lambda u,c: c.bot.get_chat_history_async_bug_check())) # your fix
-    app.add_handler(CommandHandler("help", lambda u,c: c.bot.send_message(chat_id=u.effective_chat.id, text="Help")))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
-    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), track_all_users))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("test", test_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("scan", scan_command))
+    application.add_handler(CommandHandler("userinfo", userinfo_command))
+    application.add_handler(CommandHandler("scannedcount", scannedcount_command))
+    application.add_handler(CommandHandler("pingall", pingall_command))
+    application.add_handler(CommandHandler("stayactive", stayactive_command))
+    application.add_handler(CommandHandler("allowuser", allowuser_command))
+    application.add_handler(CommandHandler("disallowuser", disallowuser_command))
 
-    app.run_polling()
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
+    application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_all_users))
 
-# Call the main
-if __name__=="__main__":
+    # Debug echo handler
+    async def debug_echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message.text:
+            await update.message.reply_text(f"Echo: {update.message.text}")
+
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_echo))
+
+    application.run_polling()
+
+
+if __name__ == "__main__":
     main()
