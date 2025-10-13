@@ -37,7 +37,7 @@ def run_fake_webserver():
     server.serve_forever()
 
 # --- Permission system for bot DP changing ---
-BOT_OWNER_ID = 123456789  # <-- Replace with your Telegram user ID here
+BOT_OWNER_ID = 5451324394  # <-- Replace with your Telegram user ID here
 allowed_users = set()
 
 async def allowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
