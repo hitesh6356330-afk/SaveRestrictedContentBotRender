@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import re
+import aiohttp
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -25,6 +26,8 @@ instagram_session = {
     "password": None,
 }
 
+KEEP_ALIVE_URL = "https://scanrobot-kul1.onrender.com"  # Your Render URL
+
 def user_is_owner(user_id):
     return user_id == config.BOT_OWNER_ID
 
@@ -32,6 +35,21 @@ def extract_instagram_username(text):
     pattern = r"(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9._]+)/?"
     match = re.match(pattern, text)
     return match.group(1) if match else text.strip('@')
+
+
+async def keep_alive_ping():
+    """Background task to keep Render instance alive by pinging the URL every 10 mins."""
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(KEEP_ALIVE_URL) as resp:
+                    if resp.status == 200:
+                        logger.info(f"Keep-alive ping successful at {KEEP_ALIVE_URL}")
+                    else:
+                        logger.warning(f"Keep-alive ping received status {resp.status}")
+            except Exception as e:
+                logger.error(f"Keep-alive ping failed: {e}")
+            await asyncio.sleep(600)  # Wait 10 minutes
 
 
 async def login_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -68,34 +86,52 @@ async def logout_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Logged out from Instagram.")
 
 
-async def fetch_posts(username, bot, chat_id, max_posts=10):
+async def fetch_and_send_instagram_posts(username, bot, chat_id, max_posts=10):
     try:
         profile = instaloader.Profile.from_username(L.context, username)
     except Exception as e:
-        logger.error(f"Failed to load profile @{username}: {e}")
+        logger.error(f"Failed to load Instagram profile @{username}: {e}")
         await bot.send_message(chat_id=chat_id, text=f"Failed to load Instagram profile @{username}")
         return
-    
-    sent = 0
-    for post in profile.get_posts():
-        if sent >= max_posts:
+
+    sent_count = 0
+    posts_iter = profile.get_posts()
+
+    while sent_count < max_posts:
+        try:
+            post = next(posts_iter)
+        except StopIteration:
             break
+        except instaloader.exceptions.QueryReturnedError as query_err:
+            if "Please wait a few minutes before you try again." in str(query_err):
+                logger.warning(f"Rate limit hit for @{username}, backing off 10 minutes")
+                await asyncio.sleep(600)
+                continue
+            else:
+                logger.error(f"Instagram query error for @{username}: {query_err}")
+                break
+        except Exception as e:
+            logger.error(f"Unexpected Instagram error for @{username}: {e}")
+            break
+        
         caption = post.caption or ""
         try:
             if post.is_video:
                 await bot.send_video(chat_id=chat_id, video=post.video_url, caption=caption[:1000])
             else:
                 await bot.send_photo(chat_id=chat_id, photo=post.url, caption=caption[:1000])
-            sent += 1
+            sent_count += 1
             await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"Failed to send Instagram post {post.shortcode}: {e}")
 
-    if sent == 0:
-        await bot.send_message(chat_id=chat_id, text=f"No posts found for @{username}")
+    if sent_count == 0:
+        await bot.send_message(chat_id=chat_id, text=f"No posts sent for @{username}")
+    else:
+        await bot.send_message(chat_id=chat_id, text=f"Sent {sent_count} posts for @{username}")
 
 
-async def fetch_stories(username, bot, chat_id):
+async def fetch_and_send_instagram_stories(username, bot, chat_id):
     if not instagram_session["logged_in"]:
         await bot.send_message(chat_id=chat_id, text="Stories require logged-in Instagram session. Please /login first.")
         return
@@ -112,14 +148,17 @@ async def fetch_stories(username, bot, chat_id):
         for story in L.get_stories(userids=[profile.userid]):
             for item in story.get_items():
                 caption = f"Story by @{username}"
-                if item.is_video:
-                    await bot.send_video(chat_id=chat_id, video=item.video_url, caption=caption)
-                else:
-                    await bot.send_photo(chat_id=chat_id, photo=item.url, caption=caption)
-                sent += 1
-                await asyncio.sleep(1)
+                try:
+                    if item.is_video:
+                        await bot.send_video(chat_id=chat_id, video=item.video_url, caption=caption)
+                    else:
+                        await bot.send_photo(chat_id=chat_id, photo=item.url, caption=caption)
+                    sent += 1
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logger.error(f"Failed to send story media: {e}")
     except Exception as e:
-        logger.error(f"Failed fetching stories for @{username}: {e}")
+        logger.error(f"Error fetching stories for @{username}: {e}")
 
     if sent == 0:
         await bot.send_message(chat_id=chat_id, text=f"No active stories for @{username}")
@@ -135,12 +174,12 @@ async def fetch_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     input_text = context.args[0]
     username = extract_instagram_username(input_text)
 
-    chat_id = config.DATA_GROUP_ID  # dump group ID from config
+    chat_id = config.DATA_GROUP_ID
 
     await update.message.reply_text(f"Fetching posts and stories for @{username}...")
 
-    await fetch_posts(username, context.bot, chat_id, max_posts=10)
-    await fetch_stories(username, context.bot, chat_id)
+    await fetch_and_send_instagram_posts(username, context.bot, chat_id, max_posts=10)
+    await fetch_and_send_instagram_stories(username, context.bot, chat_id)
 
     await update.message.reply_text(f"Completed fetching content for @{username}.")
 
@@ -202,8 +241,12 @@ def main():
     application.add_handler(CommandHandler("logout", logout_instagram))
     application.add_handler(CommandHandler("fetch_user", fetch_user))
 
-    # Handler to detect Instagram post/reel links or shortcodes in any chat message
+    # Detect Instagram post/reel links or shortcodes in any chat message
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), fetch_and_send_instagram_post_by_link))
+
+    # Start keep-alive ping task
+    loop = asyncio.get_event_loop()
+    loop.create_task(keep_alive_ping())
 
     application.run_polling()
 
