@@ -21,7 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Fake web server for Render
+
+# Fake minimal web server handler for Render
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -29,22 +30,27 @@ class SimpleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Telegram bot is running")
 
+
 def run_fake_webserver():
     port = int(os.environ.get("PORT", "10000"))
     server = HTTPServer(("0.0.0.0", port), SimpleHandler)
     logger.info(f"Starting fake web server on port {port}")
     server.serve_forever()
 
+
 BOT_OWNER_ID = 5451324394  # Your Telegram user ID
 
 # In-memory datastore: user_id -> user data dict
 tracked_users = {}
 
+
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
 
+
 def user_full_name(user: User):
     return f"{user.first_name or ''} {user.last_name or ''}".strip()
+
 
 def add_group_if_new(user_data, chat: Chat):
     for g in user_data.get("groups", []):
@@ -57,19 +63,31 @@ def add_group_if_new(user_data, chat: Chat):
         "leave_time": None
     })
 
+
 def update_name_history(user_data, new_name: str):
     history = user_data.setdefault("name_history", [])
     if not history or history[-1]["name"] != new_name:
         history.append({"name": new_name, "timestamp": now_iso()})
 
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot is up and running! Send /help to see commands.")
+
+
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Test command received!")
+
+
+async def debug_echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text:
+        await update.message.reply_text(f"Echo: {update.message.text}")
+
+
 async def scan_group_members(chat, context: ContextTypes.DEFAULT_TYPE):
-    """Call this to scan all existing members of a chat and update tracking"""
+    """Example: Scan admins and store as members (extend as needed)"""
     logger.info(f"Scanning members in group {chat.title} ({chat.id})")
-    # Telegram API does not provide a direct get all members method
-    # Workaround: get administrators + track joins & leaves
     try:
         admins = await context.bot.get_chat_administrators(chat.id)
-        # Add admins to tracking as example; extend as needed
         for admin in admins:
             user = admin.user
             user_data = tracked_users.setdefault(user.id, {
@@ -88,7 +106,14 @@ async def scan_group_members(chat, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error scanning group members: {e}")
 
-# Command handlers and event handlers
+
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in groups.")
+        return
+    await scan_group_members(chat, context)
+
 
 async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -112,16 +137,15 @@ async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         await context.bot.send_message(chat.id, f"Tracking started for new user {user_full_name(user)} ({user.id})")
 
+
 async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.message.left_chat_member
     if user and user.id in tracked_users:
         user_data = tracked_users[user.id]
-        # Mark leave time in user's group data
         for g in user_data.get("groups", []):
             if g["group_id"] == chat.id and g.get("leave_time") is None:
                 g["leave_time"] = now_iso()
-        # Update join_leave_history
         user_data.setdefault("join_leave_history", []).append({
             "event": "left",
             "group_id": chat.id,
@@ -129,6 +153,7 @@ async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "timestamp": now_iso()
         })
         await context.bot.send_message(chat.id, f"User {user_full_name(user)} ({user.id}) left the group. Tracking updated.")
+
 
 async def track_profile_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -138,6 +163,7 @@ async def track_profile_changes(update: Update, context: ContextTypes.DEFAULT_TY
         update_name_history(user_data, new_name)
         user_data["username"] = user.username
         user_data["last_seen"] = now_iso()
+
 
 async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
@@ -165,30 +191,22 @@ async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for ev in user_data.get("join_leave_history", []):
         msg += f"  - {ev['event'].capitalize()} {ev.get('group_name')} at {ev['timestamp']}\n"
     msg += f"Last Seen (message/activity): {user_data.get('last_seen') or 'Unknown'}\n"
-    # Profile photo changes not implemented due to API limitations
 
     await update.message.reply_text(msg)
 
-async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    # Only allow in groups and for admins
-    if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command can only be used in groups.")
-        return
-    # Scan members (for prototype, only admins)
-    await scan_group_members(chat, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 Bot Commands and Features:\n\n"
-        "/start - Start bot and test responsiveness\n"
+        "/start - Start and test bot responsiveness\n"
         "/help - Show this help message\n"
-        "/test - Test command for responsiveness\n"
+        "/test - Test command\n"
         "/scan - Scan current group members and track them (group only)\n"
-        "/userinfo <user_id> - Show full tracked info for a user\n"
-        "\nThe bot continuously tracks joins, leaves, and name changes after being added."
+        "/userinfo <user_id> - Show tracked info for user\n"
+        "\nBot tracks joins, leaves, and name changes after joining groups."
     )
     await update.message.reply_text(help_text)
+
 
 def main():
     threading.Thread(target=run_fake_webserver, daemon=True).start()
@@ -207,12 +225,12 @@ def main():
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_profile_changes))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_profile_changes))  # Update last seen
 
-    # Debug echo handler
+    # Echo for debugging messages
     async def debug_echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.text:
             await update.message.reply_text(f"Echo: {update.message.text}")
+
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_echo))
 
     application.run_polling()
