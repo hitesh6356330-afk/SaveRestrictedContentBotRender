@@ -37,7 +37,7 @@ def run_fake_webserver():
     server.serve_forever()
 
 # --- Permission system for bot DP changing ---
-BOT_OWNER_ID = 5451324394  # Your provided Telegram user ID
+BOT_OWNER_ID = 5451324394  # Your Telegram user ID
 allowed_users = set()
 
 async def allowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -91,6 +91,18 @@ async def setbotdp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to set bot profile photo: {e}")
             await update.message.reply_text("Failed to update bot profile photo.")
+
+# --- Debug & Testing Handlers ---
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot is running! Send /help to see commands.")
+
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Test command received!")
+
+async def debug_echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text:
+        await update.message.reply_text(f"Received your message: {update.message.text}")
 
 # --- Existing bot tracking features ---
 
@@ -237,6 +249,9 @@ async def grouplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 Bot Commands and Features\n\n"
+        "/start - Start the bot and confirm it is running.\n"
+        "/test  - Test command to check bot responsiveness.\n"
+        "/help  - Show this help message.\n"
         "/userinfo <user_id> - Get detailed info about a user including username, name, and groups.\n"
         "/groupcount <user_id> - Show the number of groups a user is found in.\n"
         "/grouplist <user_id> - List all groups where the user was detected.\n"
@@ -257,15 +272,23 @@ def main():
         .build()
     )
 
+    # Debug and test commands
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("test", test_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_echo))
+
+    # Permissions and DP change handlers
     application.add_handler(CommandHandler("allowuser", allowuser_command))
     application.add_handler(CommandHandler("disallowuser", disallowuser_command))
     application.add_handler(CommandHandler("setbotdp", setbotdp_command))
     application.add_handler(CommandHandler("help", help_command))
 
+    # Tracking handlers
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_profile_changes))
 
+    # Info commands
     application.add_handler(CommandHandler("userinfo", userinfo_command))
     application.add_handler(CommandHandler("groupcount", groupcount_command))
     application.add_handler(CommandHandler("grouplist", grouplist_command))
