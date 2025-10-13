@@ -21,6 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Simple HTTP server for Render health checks
 
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -29,25 +30,20 @@ class SimpleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Telegram bot is running")
 
-
 def run_fake_webserver():
-    port = int(os.environ.get("PORT", "10000"))
+    port = int(os.environ.get("PORT", "10000"))  # Render provides PORT env
     server = HTTPServer(("0.0.0.0", port), SimpleHandler)
     logger.info(f"Starting fake web server on port {port}")
     server.serve_forever()
 
-
 allowed_users = set()
 tracked_users = {}
-
 
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
 
-
 def user_full_name(user: User):
     return f"{user.first_name or ''} {user.last_name or ''}".strip()
-
 
 def add_group_if_new(user_data, chat: Chat):
     for g in user_data.get("groups", []):
@@ -60,12 +56,10 @@ def add_group_if_new(user_data, chat: Chat):
         "leave_time": None
     })
 
-
 def update_name_history(user_data, new_name: str):
     history = user_data.setdefault("name_history", [])
     if not history or history[-1]["name"] != new_name:
         history.append({"name": new_name, "timestamp": now_iso()})
-
 
 async def store_user_data(context: ContextTypes.DEFAULT_TYPE, user_data: dict):
     text = "[USER_DATA]\n" + json.dumps(user_data, ensure_ascii=False)
@@ -75,10 +69,8 @@ async def store_user_data(context: ContextTypes.DEFAULT_TYPE, user_data: dict):
     except Exception as e:
         logger.error(f"Failed to send user data to database group: {e}")
 
-
 def user_is_allowed(user_id):
     return user_id == config.BOT_OWNER_ID or user_id in allowed_users
-
 
 async def allowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != config.BOT_OWNER_ID:
@@ -90,7 +82,6 @@ async def allowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = int(context.args[0])
     allowed_users.add(user_id)
     await update.message.reply_text(f"User {user_id} has been allowed.")
-
 
 async def disallowuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != config.BOT_OWNER_ID:
@@ -106,21 +97,77 @@ async def disallowuser_command(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text(f"User {user_id} was not previously allowed.")
 
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Welcome! This bot tracks group users and activities.\nSend /help for commands."
+    )
+
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Test command received!")
+
+async def pingall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not tracked_users:
+        await update.message.reply_text("No users tracked yet.")
+        return
+    message = (
+        "👋 Hello friends! Don’t forget to send /stayactive to keep enjoying this group’s benefits! 🚀\n\n"
+        "This helps us keep the group lively and secure for active members only!"
+    )
+    await update.message.reply_text(message)
+
+async def stayactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"Thanks for staying active, {user.first_name}! Keep enjoying the group 😀"
+    )
+
+async def scan_group_members(chat, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        total_members = await context.bot.get_chat_member_count(chat.id)
+        await context.bot.send_message(chat.id, f"Starting scan of {total_members} members in this group...")
+        admins = await context.bot.get_chat_administrators(chat.id)
+        count = 0
+        for admin in admins:
+            user = admin.user
+            user_data = {
+                "user_id": user.id,
+                "username": user.username,
+                "name": user_full_name(user),
+                "event": "scanned",
+                "group": chat.title or "",
+                "timestamp": now_iso()
+            }
+            await store_user_data(context, user_data)
+            count += 1
+            if count % 10 == 0:
+                await context.bot.send_message(chat.id, f"Scanned {count} admins so far...")
+        await context.bot.send_message(chat.id, f"Scan complete! Tracked {count} admins/members (prototype).")
+    except Exception as e:
+        logger.error(f"Error in scanning: {e}")
+        await context.bot.send_message(chat.id, f"Error during scan: {e}")
+
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in groups.")
+        return
+    await scan_group_members(chat, context)
 
 async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
     for user in update.message.new_chat_members:
         user_data = {
             "user_id": user.id,
             "username": user.username,
             "name": user_full_name(user),
             "event": "joined",
-            "group": update.effective_chat.title,
+            "group": chat.title,
             "timestamp": now_iso()
         }
         await store_user_data(context, user_data)
 
-
 async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
     user = update.message.left_chat_member
     if user:
         user_data = {
@@ -128,11 +175,10 @@ async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "username": user.username,
             "name": user_full_name(user),
             "event": "left",
-            "group": update.effective_chat.title,
+            "group": chat.title,
             "timestamp": now_iso()
         }
         await store_user_data(context, user_data)
-
 
 async def track_profile_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -148,7 +194,6 @@ async def track_profile_changes(update: Update, context: ContextTypes.DEFAULT_TY
         }
         await store_user_data(context, user_data)
 
-
 async def track_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_title = update.effective_chat.title if update.effective_chat else None
@@ -162,7 +207,6 @@ async def track_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "timestamp": now_iso()
         }
         await store_user_data(context, user_data)
-
 
 async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_is_allowed(update.effective_user.id):
@@ -212,7 +256,6 @@ async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(reply)
 
-
 async def scannedcount_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_is_allowed(update.effective_user.id):
         await update.message.reply_text("You are not authorized to use this command.")
@@ -227,59 +270,6 @@ async def scannedcount_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Failed to count scanned users.")
         return
     await update.message.reply_text(f"Currently scanned and tracked users records: {count}")
-
-
-async def pingall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not user_is_allowed(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this command.")
-        return
-    message = (
-        "👋 Hello friends! Don’t forget to send /stayactive to keep enjoying this group’s benefits! 🚀\n\n"
-        "This helps us keep the group lively and secure for active members only!"
-    )
-    await update.message.reply_text(message)
-
-
-async def stayactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await update.message.reply_text(
-        f"Thanks for staying active, {user.first_name}! Keep enjoying the group 😀"
-    )
-
-
-async def scan_group_members(chat, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        total_members = await context.bot.get_chat_member_count(chat.id)
-        await context.bot.send_message(chat.id, f"Starting scan of {total_members} members in this group...")
-        admins = await context.bot.get_chat_administrators(chat.id)
-        count = 0
-        for admin in admins:
-            user = admin.user
-            user_data = {
-                "user_id": user.id,
-                "username": user.username,
-                "name": user_full_name(user),
-                "event": "scanned",
-                "group": chat.title or "",
-                "timestamp": now_iso()
-            }
-            await store_user_data(context, user_data)
-            count += 1
-            if count % 10 == 0:
-                await context.bot.send_message(chat.id, f"Scanned {count} admins so far...")
-        await context.bot.send_message(chat.id, f"Scan complete! Tracked {count} admins/members (prototype).")
-    except Exception as e:
-        logger.error(f"Error in scanning: {e}")
-        await context.bot.send_message(chat.id, f"Error during scan: {e}")
-
-
-async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command can only be used in groups.")
-        return
-    await scan_group_members(chat, context)
-
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
@@ -297,7 +287,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\nThe bot tracks joins, leaves, messages, and name changes after joining groups."
     )
     await update.message.reply_text(help_text)
-
 
 def main():
     threading.Thread(target=run_fake_webserver, daemon=True).start()
@@ -330,7 +319,6 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_echo))
 
     application.run_polling()
-
 
 if __name__ == "__main__":
     main()
