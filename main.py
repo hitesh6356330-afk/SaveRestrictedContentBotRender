@@ -1,63 +1,135 @@
-from fastapi import FastAPI, Request
-from pydantic import BaseModel
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler
-import os
 import logging
-import asyncio
+import json
+from datetime import datetime
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
-# Enable logging
+import config
+
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_GROUP_ID = os.getenv("DATABASE_GROUP_ID")  # Telegram group ID for storing data
 
-bot = Bot(token=BOT_TOKEN)
-app = FastAPI()
+def json_serialize_user(user, group_title=None, event="unknown"):
+    """Create a JSON serializable dict of user info with metadata."""
+    return {
+        "user_id": user.id,
+        "username": user.username,
+        "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
+        "event": event,
+        "group": group_title,
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
 
-# Create Dispatcher for handling updates
-dp = Dispatcher(bot=bot, update_queue=asyncio.Queue(), use_context=True)
 
-class TelegramUpdate(BaseModel):
-    update_id: int
-    message: dict = None
-    edited_message: dict = None
-    channel_post: dict = None
-    edited_channel_post: dict = None
-
-@app.post("/webhook")
-async def telegram_webhook(update: TelegramUpdate, request: Request):
-    telegram_update = Update.de_json(update.dict(), bot)
-    dp.process_update(telegram_update)
-    return {"status": "ok"}
-
-# Command handler example: /start
-def start(update, context):
-    update.message.reply_text("Hello! I am Scanrobot, your Telegram bot.")
-
-# Store user info command example: /store_me
-def store_user_info(update, context):
-    user = update.message.from_user
-    user_info = (
-        f"UserID: {user.id}, "
-        f"Name: {user.first_name} {user.last_name or ''}, "
-        f"Username: @{user.username or 'N/A'}"
-    )
-    # Store info in the database group as a message
+async def store_user_data(context: ContextTypes.DEFAULT_TYPE, user_data: dict):
+    """Store user info as a JSON message in data group."""
+    text = "[USER_DATA]\n" + json.dumps(user_data, ensure_ascii=False)
     try:
-        bot.send_message(chat_id=DATABASE_GROUP_ID, text=user_info)
-        update.message.reply_text("Your info has been stored in the database group.")
+        await context.bot.send_message(chat_id=config.DATA_GROUP_ID, text=text)
     except Exception as e:
-        logger.error(f"Error storing info: {e}")
-        update.message.reply_text("Failed to store your info.")
+        logger.error(f"Failed to store user data: {e}")
 
-dp.add_handler(CommandHandler("start", start))
-dp.add_handler(CommandHandler("store_me", store_user_info))
+
+# When new members join
+async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for user in update.message.new_chat_members:
+        user_data = json_serialize_user(user, update.effective_chat.title, "joined")
+        await store_user_data(context, user_data)
+
+
+# When members leave
+async def member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.left_chat_member
+    if user:
+        user_data = json_serialize_user(user, update.effective_chat.title, "left")
+        await store_user_data(context, user_data)
+
+
+# Track profile changes (name, username updates)
+async def track_profile_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat_title = update.effective_chat.title if update.effective_chat else None
+    if user:
+        user_data = json_serialize_user(user, chat_title, "profile_update")
+        await store_user_data(context, user_data)
+
+
+# Fetch user info command
+async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /userinfo <user_id>")
+        return
+    user_id_str = context.args[0]
+    if not user_id_str.isdigit():
+        await update.message.reply_text("User ID must be a number.")
+        return
+    user_id = int(user_id_str)
+
+    # Search recent messages for user info
+    messages = []
+    try:
+        async for message in context.bot.get_chat_history(config.DATA_GROUP_ID, limit=500):
+            if message.text and message.text.startswith("[USER_DATA]"):
+                try:
+                    data = json.loads(message.text.split("\n", 1)[1])
+                    if data.get("user_id") == user_id:
+                        messages.append(data)
+                except:
+                    continue
+    except Exception as e:
+        logger.error(f"Error fetching messages: {e}")
+        await update.message.reply_text("Failed to fetch user data.")
+        return
+
+    if not messages:
+        await update.message.reply_text("No data found for this user.")
+        return
+
+    # Summarize information
+    username = messages[-1].get("username", "None")
+    name = messages[-1].get("name", "None")
+    groups = {m.get("group") for m in messages if m.get("group")}
+    groups.discard(None)
+    group_count = len(groups)
+
+    reply = (
+        "Human found!\n"
+        f"Telegram ID: {user_id}\n"
+        f"Username: {username}\n"
+        f"Name: {name}\n"
+        f"Number of groups found: {group_count}\n"
+        f"Groups: {', '.join(groups) if groups else 'None'}"
+    )
+    await update.message.reply_text(reply)
+
+
+async def main():
+    application = (
+        ApplicationBuilder()
+        .token(config.BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
+
+    # Event handlers
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
+    application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_left))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), track_profile_changes))
+    application.add_handler(CommandHandler("userinfo", userinfo_command))
+
+    await application.run_polling()
+
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), log_level="info")
+    import asyncio
+    asyncio.run(main())
