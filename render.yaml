@@ -2,8 +2,8 @@ services:
   - type: web
     name: SaveRestrictedContentBot
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python3 -m bot.py
+    buildCommand: apt-get update && apt-get install -y ntpdate && pip install -r requirements.txt
+    startCommand: ntpdate time.cloudflare.com && python3 -m main.bot
     envVars:
       - key: API_ID
         value: "your_api_id"
