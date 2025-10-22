@@ -16,9 +16,9 @@ async def ping_render_url():
         await asyncio.sleep(4 * 60)  # ping every 4 minutes
 
 async def main():
-    API_ID = int(os.getenv("API_ID"))
-    API_HASH = os.getenv("API_HASH")
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    API_ID = int(os.getenv("21747552"))
+    API_HASH = os.getenv("b1e6c2c3a183f0fa7219db450650ee8a")
+    BOT_TOKEN = os.getenv("8268550979:AAFBPEKkaNCEgCBza3Qcmg4K50FZj92CopM")
 
     app = Client(
         "SaveRestrictedContentBot",
